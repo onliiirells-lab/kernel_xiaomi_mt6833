@@ -1,0 +1,127 @@
+
+name: Build MT6833 Camellia Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - flyme
+    paths:
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: flyme
+          path: kernel-4.14
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex \
+            gcc git libelf-dev libssl-dev \
+            libncurses5 libncurses5-dev libtinfo5 \
+            lz4 python3 rsync unzip zip \
+            zlib1g-dev device-tree-compiler
+
+      - name: Download Clang r383902
+        run: |
+          set -e
+          CLANG_DIR="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-r383902"
+          mkdir -p "$CLANG_DIR"
+
+          curl -fL --retry 3 \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
+            -o /tmp/clang.tar.gz
+
+          tar -xzf /tmp/clang.tar.gz -C "$CLANG_DIR"
+
+          test -x "$CLANG_DIR/bin/clang"
+
+      - name: Download GCC 4.9
+        run: |
+          set -e
+          GCC_DIR="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+
+          mkdir -p "$(dirname "$GCC_DIR")"
+
+          git clone --depth=1 --single-branch \
+            -b android11-release \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            "$GCC_DIR"
+
+      - name: Prepare toolchain
+        run: |
+          set -e
+          CLANG_DIR="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-r383902"
+          GCC_BIN="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin"
+
+          test -x "$CLANG_DIR/bin/clang"
+          test -x "$GCC_BIN/aarch64-linux-android-gcc"
+          test -x "$GCC_BIN/aarch64-linux-android-ld.bfd"
+
+          cd "$GCC_BIN"
+
+          for tool in ar as size strip nm cpp gcc objcopy objdump readelf; do
+            ln -sf "aarch64-linux-android-$tool" \
+              "aarch64-linux-androidkernel-$tool"
+          done
+
+          ln -sf aarch64-linux-android-ld.bfd \
+            aarch64-linux-androidkernel-ld
+
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+          echo "$GCC_BIN" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Configure kernel
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+          make -C kernel-4.14 \
+            O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-androidkernel- \
+            CC=clang \
+            LD=ld.lld \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            camellia_defconfig
+
+      - name: Build kernel
+        run: |
+          set -e
+
+          make -C kernel-4.14 \
+            O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-androidkernel- \
+            CC=clang \
+            LD=ld.lld \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            -j"$(nproc --all)" \
+            Image.gz dtbs
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellia-kernel-standard
+          path: |
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dts/**/*.dtb
+            out/.config
+          if-no-files-found: error
